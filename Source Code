@@ -1,0 +1,246 @@
+################################################################
+# Shiny app by Andrew Marchant
+# Oct 23, 2023
+#
+# Shows the percentage of fatal accidents for a given accident type
+#
+# Deployed at https://dmarchant00.shinyapps.io/Traffic_HighSeverity/
+################################################################
+
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(readr)
+library(shinythemes)
+
+distract <- read_csv("distract.csv")
+drimpair <- read_csv("drimpair.csv")
+drugs <- read_csv("drugs.csv")
+person <- read_csv("person.csv")
+weather <- read_csv("weather.csv")
+vehicle <- read_csv("vehicle.csv")
+
+# Merge Data Together
+Traffic <- person %>%
+  select(STATE, STATENAME, ST_CASE, VEH_NO, PER_NO, HOURNAME, HARM_EVNAME, MAN_COLLNAME, VPICMAKENAME, AGE, INJ_SEV, INJ_SEVNAME) %>%
+  full_join(drimpair %>% select(ST_CASE, VEH_NO, DRIMPAIR, DRIMPAIRNAME), by = c("ST_CASE", "VEH_NO")) %>%
+  full_join(distract %>% select(ST_CASE, VEH_NO, DRDISTRACT, DRDISTRACTNAME), by = c("ST_CASE", "VEH_NO")) %>%
+  full_join(vehicle %>% select(ST_CASE, VEH_NO, MONTHNAME, TRAV_SPNAME), by = c("ST_CASE", "VEH_NO")) %>%
+  full_join(drugs %>% select(ST_CASE, VEH_NO, PER_NO, DRUGSPEC, DRUGRESNAME), by = c("ST_CASE", "VEH_NO", "PER_NO")) %>%
+  full_join(weather %>% select(ST_CASE, WEATHERNAME), by = "ST_CASE")
+
+# Change NA values to show they represent pedestrains
+Traffic <- Traffic %>%
+  mutate(
+    DRIMPAIRNAME = ifelse(is.na(DRIMPAIRNAME), "Pedestrian", DRIMPAIRNAME),
+    DRDISTRACTNAME = ifelse(is.na(DRDISTRACTNAME), "Pedestrian", DRDISTRACTNAME),
+    VPICMAKENAME = ifelse(is.na(VPICMAKENAME), "Pedestrian", VPICMAKENAME),
+    TRAV_SPNAME = ifelse(is.na(TRAV_SPNAME), "Pedestrian", TRAV_SPNAME),
+    MONTHNAME = ifelse(is.na(MONTHNAME), "Pedestrian", MONTHNAME)
+  )
+
+# Combine Similar sub categories
+Traffic <- Traffic %>%
+  mutate(
+    WEATHERNAME = case_when(
+      WEATHERNAME %in% c("Not Reported", "Other", "Reported as Unknown") ~ "Unknown",
+      TRUE ~ WEATHERNAME
+    ),
+    DRUGRESNAME = case_when(
+      DRUGRESNAME %in% c("Tested, No Drugs Found/Negative", "Test Not Given", "Reported as Unknown if Tested for Drugs", "Not Reported") ~ "Negative / Not Tested",
+      TRUE ~ DRUGRESNAME
+    ),
+    DRIMPAIRNAME = case_when(
+      DRIMPAIRNAME %in% c("Other Physical Impairment", "Physical Impairment - No Details") ~ "Physical Impairment",
+      TRUE ~ DRIMPAIRNAME
+    ),
+    DRIMPAIRNAME = case_when(
+      DRIMPAIRNAME %in% c("Not Reported", "Reported as Unknown if Impaired") ~ "Unknown",
+      TRUE ~ DRIMPAIRNAME
+    ),
+    DRDISTRACTNAME = case_when(
+      DRDISTRACTNAME %in% c("Distraction (Distracted), Details Unknown", "Distraction/Inattention", "Inattention (Inattentive), Details Unknown", "Other Distraction [Specify:]") ~ "Distracted: Unknown",
+      TRUE ~ DRDISTRACTNAME
+    ),
+    DRDISTRACTNAME = case_when(
+      DRDISTRACTNAME %in% c("Not Reported", "Reported as Unknown if Distracted") ~ "Unknown",
+      TRUE ~ DRDISTRACTNAME
+    ),
+    TRAV_SPNAME = case_when(
+      TRAV_SPNAME %in% c("Not Reported", "Reported as Unknown") ~ "Unknown",
+      TRUE ~ TRAV_SPNAME
+    )
+  )
+
+# Clean Speed Column
+Traffic <- Traffic %>%
+  mutate(TRAV_SPNAME = gsub(" MPH", "", TRAV_SPNAME), # Remove " MPH"
+         TRAV_SPNAME = gsub("Not Reported|Pedestrian|Reported as Unknown|Stopped Motor Vehicle In- Transport", NA, TRAV_SPNAME), # Set non-numeric cases to NA
+         TRAV_SPNAME = as.numeric(TRAV_SPNAME)) # Convert to numeric
+
+# Bin speeds into categories of 10 mph
+Traffic <- Traffic %>%
+  mutate(SpeedCategory = cut(
+    TRAV_SPNAME,
+    breaks = seq(0, 100, by = 10), # Define breaks for bins
+    include.lowest = TRUE,
+    right = FALSE,
+    labels = paste(seq(0, 90, by = 10), seq(10, 100, by = 10), sep = "-") # Create labels like "0-10", "10-20"
+  ))
+
+
+# Create injury severity metric - 1 if fatal injury, 0 elsewhere
+Traffic$INJ_SEVERITY <- ifelse(Traffic$INJ_SEV == 4, 1, 0)
+
+# Define UI for application that draws a histogram
+ui <- fluidPage(
+    theme = shinythemes::shinytheme("cerulean"),
+    # Application title
+    titlePanel("Fatal Accident"),
+
+    # Sidebar with a variable selection and sub categories selection
+    sidebarLayout(
+      sidebarPanel(
+        selectInput("Variable", "Select Variable",
+                    choices = c("Weather" = "WEATHERNAME",
+                                "Speed" = "SpeedCategory",
+                                "Month" = "MONTHNAME",
+                                "Under the influence of drugs" = "DRUGRESNAME",
+                                "Driving impaired" = "DRIMPAIRNAME",
+                                "Driving distracted" = "DRDISTRACTNAME",
+                                "Vehicle Make" = "VPICMAKENAME",
+                                "Accident Type" = "HARM_EVNAME")),
+        
+        radioButtons("selectionMode", "Choose Display Mode:",
+                     choices = c("Select Top N Categories" = "top_n",
+                                 "Select Specific Categories" = "specific")),
+        
+        conditionalPanel(
+          condition = "input.selectionMode == 'top_n'",
+          sliderInput("numCategories", "Number of Categories to Display:",
+                      min = 1, max = 20, value = 5, step = 1)
+        ),
+        conditionalPanel(
+          condition = "input.selectionMode == 'specific'",
+          checkboxGroupInput("categories", "Select Categories to Display:", choices = NULL)
+        ),
+        tags$figure(
+          class = "centerGettyImage",
+          HTML("<a id='HuX0E0YET9dbx2SFWYCVhQ' class='gie-single' href='http://www.gettyimages.com/detail/472293743' target='_blank' style='color:#a7a7a7;text-decoration:none;font-weight:normal !important;border:none;display:inline-block;'>Embed from Getty Images</a><script>window.gie=window.gie||function(c){(gie.q=gie.q||[]).push(c)};gie(function(){gie.widgets.load({id:'HuX0E0YET9dbx2SFWYCVhQ',sig:'NW9aqAK4s-RGNrVhyd2ohsBCghITE_WDvi81znxEHBA=',w:'488px',h:'353px',items:'472293743',caption: true ,tld:'com',is360: false })});</script><script src='//embed-cdn.gettyimages.com/widgets.js' charset='utf-8' async></script>"),
+        ),
+      ),
+        # Show a violin plot of the percentage of servere injury for given sub category
+        mainPanel(
+           plotlyOutput("ViolinPlot", height = "750px", width = "100%"),
+           textOutput("caption")
+        )
+    )
+)
+
+# Define server logic required to draw a histogram
+server <- function(input, output, session) {
+
+  observe({
+    req(input$Variable)
+    var <- input$Variable
+    
+    # Filter out categories with fewer than 100 cases
+    filtered_data <- Traffic %>%
+      filter(!is.na(INJ_SEVERITY), !!sym(var) != "Pedestrian", !is.na(!!sym(var))) %>%
+      group_by(across(all_of(var))) %>%
+      summarize(total_cases = n()) %>%
+      filter(total_cases >= 100)
+    
+    # Update checkbox choices for specific category selection
+    categories <- filtered_data[[var]]
+    updateCheckboxGroupInput(session, "categories", choices = categories, selected = NULL)
+    
+    # Update max for the slider based on number of filtered categories
+    updateSliderInput(session, "numCategories", max = length(categories))
+  })
+  
+  # Calculate severity percentages based on selection mode
+  severity_percentages <- reactive({
+    req(input$Variable)
+    var <- input$Variable
+    
+    if (input$selectionMode == "top_n") {
+      Traffic %>%
+        filter(!is.na(INJ_SEVERITY), !!sym(var) != "Pedestrian", !is.na(!!sym(var))) %>%
+        group_by(across(all_of(var))) %>%
+        summarize(
+          total_cases = n(),
+          high_severity_count = sum(INJ_SEVERITY),
+          high_severity_percentage = (high_severity_count / total_cases) * 100
+        ) %>%
+        filter(total_cases >= 100) %>%
+        slice_max(total_cases, n = input$numCategories)
+      
+    } else if (input$selectionMode == "specific") {
+      req(input$categories)
+      Traffic %>%
+        filter(!is.na(INJ_SEVERITY), !!sym(var) %in% input$categories, !!sym(var) != "Pedestrian", !is.na(!!sym(var))) %>%
+        group_by(across(all_of(var))) %>%
+        summarize(
+          total_cases = n(),
+          high_severity_count = sum(INJ_SEVERITY),
+          high_severity_percentage = (high_severity_count / total_cases) * 100
+        ) %>%
+        filter(total_cases >= 100)
+    }
+  })
+    
+    output$ViolinPlot <- renderPlotly({
+      data <- severity_percentages()
+      var <- input$Variable
+      
+      display_names <- c(
+        WEATHERNAME = "weather",
+        DRUGRESNAME = "under the influence of drugs",
+        DRIMPAIRNAME = "driving impaired",
+        DRDISTRACTNAME = "driving distracted",
+        VPICMAKENAME = "vehicle Make",
+        HARM_EVNAME = "accident Type",
+        SpeedCategory = "speed",
+        MONTHNAME = "month"
+      )
+      
+      # Get display name for the selected variable
+      display_name <- display_names[[var]]
+
+      p <- ggplot(data, aes_string(x = var, y = "high_severity_percentage")) +
+        geom_segment(aes(x = reorder(get(var), high_severity_percentage), 
+                         xend = reorder(get(var), high_severity_percentage), 
+                         y = 0, 
+                         yend = high_severity_percentage), size = .5) +
+        geom_point(aes(color = high_severity_percentage), size = 4, alpha = 0.6) +
+        labs(title = paste("Fatal accident by", display_name),
+             x = NULL,
+             y = "Fatal accident percentage (%)",
+             color = var) +
+        scale_color_gradient(low = "green", high = "red") +
+        theme_light() +
+        coord_flip() +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(),
+          legend.position = "none",
+          axis.title.x = element_text(size = 16),
+          axis.text.x = element_text(size = 14, face = "bold"),
+          axis.text.y = element_text(size = 14, face = "bold"),
+          title = element_text(size = 14, face = "bold")
+        )
+      
+      ggplotly(p)
+      
+    })
+    
+    output$caption <- renderText({
+      "*Percent of Fatal Accidents by category"
+    })
+}
+
+# Run the application 
+shinyApp(ui = ui, server = server)
