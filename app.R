@@ -220,7 +220,7 @@ server <- function(input, output, session) {
              x = NULL,
              y = "Fatal accident percentage (%)",
              color = var) +
-        scale_color_gradient(low = "green", high = "red") +
+        scale_color_gradient(low = "blue", high = "red") +
         theme_light() +
         coord_flip() +
         theme(
